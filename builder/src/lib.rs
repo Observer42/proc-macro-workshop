@@ -50,6 +50,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
+    let build_fields = fields.iter().map(|field| {
+        let name = &field.ident;
+        quote! {
+            #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))?
+        }
+    });
+
     let expanded = quote! {
         #vis struct #builder_name {
             #(#optionized,)*
@@ -65,10 +72,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #builder_name {
             #(#builder_methods)*
+
+            #vis fn build(&mut self) -> Result<#type_name, Box<dyn std::error::Error>> {
+                Ok(#type_name {
+                    #(#build_fields,)*
+                })
+            }
         }
     };
-
-    //eprintln!("{:#?}", expanded);
 
     TokenStream::from(expanded)
 }
