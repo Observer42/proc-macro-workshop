@@ -22,6 +22,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     } else {
         unimplemented!()
     };
+    //eprintln!("{:#?}", fields);
 
     let optionized = fields.iter().map(|field| {
         let name = &field.ident;
@@ -38,7 +39,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
-    //eprintln!("{:#?}", fields);
+    let builder_methods = fields.iter().map(|field| {
+        let name = &field.ident;
+        let ty = &field.ty;
+        quote! {
+            #vis fn #name(&mut self, #name: #ty) -> &mut Self {
+                self.#name = Some(#name);
+                self
+            }
+        }
+    });
 
     let expanded = quote! {
         #vis struct #builder_name {
@@ -51,6 +61,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #(#initial_values,)*
                 }
             }
+        }
+
+        impl #builder_name {
+            #(#builder_methods)*
         }
     };
 
