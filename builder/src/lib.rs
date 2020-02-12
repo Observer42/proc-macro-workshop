@@ -27,8 +27,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let optionized = fields.iter().map(|field| {
         let name = &field.ident;
         let ty = &field.ty;
-        quote! {
-            #name: std::option::Option<#ty>
+        if is_option_ty(ty) {
+            quote! {
+                #name: #ty
+            }
+        } else {
+            quote! {
+                #name: std::option::Option<#ty>
+            }
         }
     });
 
@@ -41,7 +47,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let builder_methods = fields.iter().map(|field| {
         let name = &field.ident;
-        let ty = &field.ty;
+        let mut ty = &field.ty;
+        if is_option_ty(ty) {
+            ty = unwrap_option_ty(ty);
+        }
         quote! {
             #vis fn #name(&mut self, #name: #ty) -> &mut Self {
                 self.#name = Some(#name);
@@ -52,8 +61,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let build_fields = fields.iter().map(|field| {
         let name = &field.ident;
-        quote! {
-            #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))?
+        let ty = &field.ty;
+        if is_option_ty(ty) {
+            quote! {
+                #name: self.#name.clone()
+            }
+        } else {
+            quote! {
+                #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))?
+            }
         }
     });
 
@@ -82,4 +98,29 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+fn is_option_ty(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(ref tp) = ty {
+        if tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Option" {
+            return true;
+        }
+    }
+    false
+}
+
+fn unwrap_option_ty(ty: &syn::Type) -> &syn::Type {
+    assert!(is_option_ty(ty));
+    if let syn::Type::Path(ref tp) = ty {
+        if let syn::PathArguments::AngleBracketed(ref bracketed_args) =
+            tp.path.segments[0].arguments
+        {
+            assert_eq!(bracketed_args.args.len(), 1);
+            let path = &bracketed_args.args[0];
+            if let syn::GenericArgument::Type(unwrapped) = path {
+                return unwrapped;
+            }
+        }
+    }
+    unreachable!()
 }
