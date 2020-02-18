@@ -26,72 +26,101 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
     //eprintln!("{:#?}", fields);
 
-    let builder_fields = fields.iter().map(|field| {
-        let name = &field.ident;
-        let ty = &field.ty;
-        if is_option_ty(ty) || builder_attr(&field).is_some() {
-            quote! { #name: #ty }
-        } else {
-            quote! { #name: std::option::Option<#ty> }
-        }
-    });
+    let attributes = fields.iter().map(|field| builder_attr(&field));
 
-    let initial_values = fields.iter().map(|field| {
-        let name = &field.ident;
-        if builder_attr(&field).is_some() {
-            quote! { #name: std::vec::Vec::new() }
-        } else {
-            quote! { #name: std::option::Option::None }
-        }
-    });
+    let attr_contents = attributes
+        .clone()
+        .map(|attr| attr.and_then(|a| parse_attr(a)))
+        .collect::<Vec<_>>();
 
-    let builder_methods = fields.iter().map(|field| {
-        let name = &field.ident;
-        let mut ty = &field.ty;
-        if is_option_ty(ty) {
-            ty = unwrap_option_ty(ty);
-        }
-        if let Some(attr) = builder_attr(&field) {
-            match &parse_attr(attr) {
-                Ok(each_name) => {
-                    let each_ty = unwrap_ty(ty);
-                    if name.as_ref().unwrap() == each_name {
-                        quote! {
-                            #vis fn #each_name(&mut self, #each_name: #each_ty) -> &mut Self {
-                                self.#name.push(#each_name);
-                                self
+    let builder_fields = fields
+        .iter()
+        .zip(attr_contents.iter())
+        .map(|(field, attr_inner)| {
+            let name = &field.ident;
+            let ty = &field.ty;
+            if is_option_ty(ty) || attr_inner.is_some() {
+                quote! { #name: #ty }
+            } else {
+                quote! { #name: std::option::Option<#ty> }
+            }
+        });
+
+    let initial_values = fields
+        .iter()
+        .zip(attr_contents.iter())
+        .map(|(field, attr_inner)| {
+            let name = &field.ident;
+            if attr_inner.is_some() {
+                quote! { #name: std::vec::Vec::new() }
+            } else {
+                quote! { #name: std::option::Option::None }
+            }
+        });
+
+    let builder_methods = fields.iter().zip(attr_contents.iter()).zip(attributes).map(
+        |((field, attr_inner), attr)| {
+            let name = &field.ident;
+            let mut ty = &field.ty;
+            if is_option_ty(ty) {
+                ty = unwrap_option_ty(ty);
+            }
+            if attr.is_some() {
+                match attr_inner {
+                    Some(each_name) => {
+                        let each_ty = unwrap_ty(ty);
+                        if name.as_ref().unwrap() == each_name {
+                            quote! {
+                                #vis fn #each_name(&mut self, #each_name: #each_ty) -> &mut Self {
+                                    self.#name.push(#each_name);
+                                    self
+                                }
                             }
-                        }
-                    } else {
-                        quote! {
-                            #vis fn #name(&mut self, #name: #ty) -> &mut Self {
-                                self.#name = #name;
-                                self
-                            }
+                        } else {
+                            quote! {
+                                #vis fn #name(&mut self, #name: #ty) -> &mut Self {
+                                    self.#name = #name;
+                                    self
+                                }
 
-                            #vis fn #each_name(&mut self, #each_name: #each_ty) -> &mut Self {
-                                self.#name.push(#each_name);
-                                self
+                                #vis fn #each_name(&mut self, #each_name: #each_ty) -> &mut Self {
+                                    self.#name.push(#each_name);
+                                    self
+                                }
                             }
                         }
                     }
+                    None => {
+                        let meta = attr.unwrap().parse_meta().unwrap();
+                        let err = match &meta {
+                            syn::Meta::List(meta_list) => syn::Error::new_spanned(
+                                meta_list,
+                                "expected `builder(each = \"...\")`",
+                            )
+                            .to_compile_error(),
+                            _ => {
+                                syn::Error::new_spanned(meta, "expected `builder(each = \"...\")`")
+                                    .to_compile_error()
+                            }
+                        };
+                        quote! { #err }
+                    }
                 }
-                Err(_) => panic!("invalid attr"),
-            }
-        } else {
-            quote! {
-                #vis fn #name(&mut self, #name: #ty) -> &mut Self {
-                    self.#name = std::option::Option::Some(#name);
-                    self
+            } else {
+                quote! {
+                    #vis fn #name(&mut self, #name: #ty) -> &mut Self {
+                        self.#name = std::option::Option::Some(#name);
+                        self
+                    }
                 }
             }
-        }
-    });
+        },
+    );
 
-    let build_fields = fields.iter().map(|field| {
+    let build_fields = fields.iter().zip(attr_contents.iter()).map(|(field, attr_inner)| {
         let name = &field.ident;
         let ty = &field.ty;
-        if is_option_or_vec_ty(ty) {
+        if is_option_ty(ty) || attr_inner.is_some() {
             quote! { #name: self.#name.clone() }
         } else {
             quote! { #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))? }
@@ -134,16 +163,6 @@ fn is_option_ty(ty: &syn::Type) -> bool {
     false
 }
 
-fn is_option_or_vec_ty(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(ref tp) = ty {
-        if tp.path.segments.len() == 1 {
-            let ident = &tp.path.segments[0].ident;
-            return ident == "Option" || ident == "Vec";
-        }
-    }
-    false
-}
-
 fn builder_attr(ty: &syn::Field) -> Option<&syn::Attribute> {
     for attr in &ty.attrs {
         if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
@@ -153,25 +172,29 @@ fn builder_attr(ty: &syn::Field) -> Option<&syn::Attribute> {
     None
 }
 
-fn parse_attr(attr: &syn::Attribute) -> Result<syn::Ident, Box<dyn std::error::Error>> {
-    let meta = attr.parse_meta()?;
-    let lit = match meta {
+fn parse_attr(attr: &syn::Attribute) -> Option<syn::Ident> {
+    let meta = attr.parse_meta().unwrap();
+    let lit = match &meta {
         syn::Meta::List(meta_list) => {
             if meta_list.nested.len() != 1 {
-                Err("wrong attr format!".into())
+                None
             } else {
                 if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = &meta_list.nested[0] {
-                    Ok(nv.lit.clone())
+                    if nv.path.segments.len() == 1 && nv.path.segments[0].ident == "each" {
+                        Some(nv.lit.clone())
+                    } else {
+                        None
+                    }
                 } else {
-                    Err("wrong attr format!".into())
+                    None
                 }
             }
         }
-        _ => Err("wrong attr format!".to_owned()),
+        _ => None,
     }?;
     match lit {
-        syn::Lit::Str(s) => Ok(syn::Ident::new(&s.value(), s.span())),
-        _ => Err("wrong attr format!".into()),
+        syn::Lit::Str(s) => Some(syn::Ident::new(&s.value(), s.span())),
+        _ => None,
     }
 }
 
